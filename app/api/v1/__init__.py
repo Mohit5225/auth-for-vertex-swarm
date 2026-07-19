@@ -1,4 +1,7 @@
-"""API v1 routes"""
-from . import auth, endpoints, tools
+"""API v1 routes.
 
-__all__ = ["auth", "endpoints", "tools"]
+Submodules are imported directly by app.main (auth, oauth).
+Do not eagerly import tools/endpoints here — tools pulls in Redis.
+"""
+
+__all__ = ["auth", "oauth", "endpoints", "tools"]
