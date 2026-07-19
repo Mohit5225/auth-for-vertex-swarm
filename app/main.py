@@ -110,7 +110,11 @@ async def lifespan(app: FastAPI):
 
     try:
         logger.info("Connecting to NATS...")
-        await setup_nats(settings.nats_url)
+        await setup_nats(
+            settings.nats_url,
+            creds_file=settings.nats_creds_file,
+            creds_content=settings.nats_creds_content
+        )
         logger.info("✅ NATS connected")
     except Exception as exc:
         logger.error(f"❌ NATS connection failed: {exc}")

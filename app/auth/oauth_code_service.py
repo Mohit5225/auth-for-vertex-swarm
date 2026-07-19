@@ -6,7 +6,7 @@ import json
 import secrets
 from typing import Any
 
-from nats.js.errors import KeyNotFoundError, KeyValueError
+from nats.js.errors import KeyNotFoundError, KeyValueError, BadRequestError
 
 from app.db.nats_db import get_js_kv
 
@@ -46,7 +46,7 @@ async def _consume(bucket: str, prefix: str, identifier: str) -> dict[str, Any]:
         # request can consume a given record.
         await kv.delete(key, last=entry.revision)
         payload = json.loads(entry.value.decode("utf-8"))
-    except (KeyNotFoundError, KeyValueError, json.JSONDecodeError) as exc:
+    except (KeyNotFoundError, KeyValueError, BadRequestError, json.JSONDecodeError) as exc:
         raise OAuthCodeError("OAuth transaction is invalid, expired, or already used") from exc
 
     expires_at = payload.get("expires_at")

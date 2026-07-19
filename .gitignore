@@ -1,7 +1,9 @@
-# Environments
+# Environments & secrets (never commit)
 .env
 .env.*
 !.env.example
+auth.creds
+*.creds
 
 # Python
 __pycache__/

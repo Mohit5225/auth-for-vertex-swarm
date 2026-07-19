@@ -12,7 +12,7 @@ import jwt
 
 from app.core.config import settings
 from app.db.nats_db import get_js_kv
-from nats.js.errors import KeyNotFoundError, KeyValueError
+from nats.js.errors import KeyNotFoundError, KeyValueError, BadRequestError
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,7 @@ async def _consume_refresh_session(jti: str) -> str | None:
         # This prevents concurrent refreshes from minting multiple token pairs.
         await kv.delete(refresh_key, last=entry.revision)
         return entry.value.decode("utf-8")
-    except (KeyNotFoundError, KeyValueError):
+    except (KeyNotFoundError, KeyValueError, BadRequestError):
         return None
     except Exception as e:
         logger.error(f"Failed to consume refresh session {jti}: {e}")
@@ -144,7 +144,7 @@ async def issue_extension_token_pair(
     now = _utc_now()
 
     access_expires_at = now + timedelta(seconds=settings.app_auth_access_ttl_seconds)
-    refresh_expires_at = now + timedelta(seconds=settings.app_auth_refresh_ttl_seconds)
+    refresh_expires_at = now + timedelta(seconds=settings.app_auth_refresh_ttl_seconds)
     refresh_jti = secrets.token_urlsafe(24)
 
     base_claims = {
@@ -156,6 +156,10 @@ async def issue_extension_token_pair(
         "iat": int(now.timestamp()),
     }
 
+    import hashlib
+    raw_pub = settings.app_auth_public_key.strip()
+    kid = hashlib.sha256(raw_pub.encode()).hexdigest()[:16]
+
     access_token = jwt.encode(
         {
             **base_claims,
@@ -164,6 +168,7 @@ async def issue_extension_token_pair(
         },
         private_key,
         algorithm=settings.app_auth_algorithm,
+        headers={"kid": kid},
     )
 
     refresh_token = jwt.encode(
@@ -175,6 +180,7 @@ async def issue_extension_token_pair(
         },
         private_key,
         algorithm=settings.app_auth_algorithm,
+        headers={"kid": kid},
     )
 
     await _store_refresh_session(

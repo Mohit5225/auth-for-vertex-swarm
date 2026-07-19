@@ -21,7 +21,7 @@ asyncpg==0.30.0
 alembic==1.16.2
 
 # NATS (token storage & cache)
-nats-py==2.10.0
+nats-py[nkeys]==2.10.0
 
 # Testing
 pytest==8.4.1
