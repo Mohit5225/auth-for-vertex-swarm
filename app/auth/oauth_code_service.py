@@ -29,7 +29,7 @@ def _expiry(seconds: int) -> str:
 async def _put(bucket: str, ttl: int, prefix: str, payload: dict[str, Any]) -> str:
     identifier = secrets.token_urlsafe(32)
     kv = await get_js_kv(bucket, ttl=ttl)
-    await kv.create(f"{prefix}.{identifier}", json.dumps(payload).encode("utf-8"))
+    await kv.put(f"{prefix}.{identifier}", json.dumps(payload).encode("utf-8"))
     return identifier
 
 

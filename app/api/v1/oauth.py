@@ -70,7 +70,7 @@ def _oauth_callback_url(request: Request) -> str:
     configured_base = settings.public_base_url.strip().rstrip("/")
     if configured_base:
         return f"{configured_base}/oauth/callback"
-    return str(request.url_for("oauth_callback"))
+    return f"{str(request.base_url).rstrip('/')}/oauth/callback"
 
 
 @router.get("/start")
@@ -90,11 +90,18 @@ async def oauth_start(
     if code_challenge_method != "S256" or not _PKCE_CHALLENGE_RE.fullmatch(code_challenge):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PKCE S256 is required")
 
-    transaction_id = await create_login_transaction(
-        redirect_uri=redirect_uri,
-        state=state,
-        code_challenge=code_challenge,
-    )
+    try:
+        transaction_id = await create_login_transaction(
+            redirect_uri=redirect_uri,
+            state=state,
+            code_challenge=code_challenge,
+        )
+    except Exception as exc:
+        logger.exception("Failed to create OAuth login transaction")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Auth storage unavailable: {exc}",
+        ) from exc
     
     # Dynamically determine the backend's callback URL based on where the app is deployed
     backend_callback_url = _oauth_callback_url(request)
