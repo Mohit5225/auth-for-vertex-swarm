@@ -65,6 +65,14 @@ def _pkce_challenge(verifier: str) -> str:
     ).rstrip(b"=").decode("ascii")
 
 
+def _oauth_callback_url(request: Request) -> str:
+    """Resolve the hosted OAuth callback URL (Neon returns here after Google sign-in)."""
+    configured_base = settings.public_base_url.strip().rstrip("/")
+    if configured_base:
+        return f"{configured_base}/oauth/callback"
+    return str(request.url_for("oauth_callback"))
+
+
 @router.get("/start")
 async def oauth_start(
     request: Request,
@@ -89,7 +97,7 @@ async def oauth_start(
     )
     
     # Dynamically determine the backend's callback URL based on where the app is deployed
-    backend_callback_url = str(request.url_for("oauth_callback"))
+    backend_callback_url = _oauth_callback_url(request)
     
     neon_callback_url = _append_query(backend_callback_url, transaction=transaction_id)
     html = f"""
@@ -107,7 +115,8 @@ async def oauth_start(
             import {{ createAuthClient }} from "https://esm.sh/better-auth/client?bundle";
             
             const authClient = createAuthClient({{
-                baseURL: "{settings.neon_auth_base_url}"
+                baseURL: "{settings.neon_auth_base_url}",
+                fetchOptions: {{ credentials: "include" }},
             }});
             
             authClient.signIn.social({{
@@ -137,7 +146,8 @@ async def oauth_callback(request: Request):
             import {{ createAuthClient }} from "https://esm.sh/better-auth/client?bundle";
             
             const authClient = createAuthClient({{
-                baseURL: "{settings.neon_auth_base_url}"
+                baseURL: "{settings.neon_auth_base_url}",
+                fetchOptions: {{ credentials: "include" }},
             }});
 
             window.onload = async function() {{
