@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 _nats_client: Optional[NATS] = None
 
 
+def _normalize_creds_content(content: str) -> str:
+    """Render .env imports often store multiline creds with literal \\n escapes."""
+    text = content.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1]
+    if "\\n" in text:
+        text = text.replace("\\n", "\n")
+    return text.strip()
+
+
 async def setup_nats(url: str, creds_file: Optional[str] = None, creds_content: Optional[str] = None) -> None:
     """Initialize the global NATS client."""
     global _nats_client
@@ -23,9 +33,12 @@ async def setup_nats(url: str, creds_file: Optional[str] = None, creds_content: 
     # If running on Render, we might pass the file content directly via an env variable.
     # nats-py requires a file path, so we write the content to a temporary file.
     if creds_content and creds_content.strip():
+        normalized = _normalize_creds_content(creds_content)
         fd, temp_creds_path = tempfile.mkstemp(suffix=".creds")
-        with os.fdopen(fd, 'w') as f:
-            f.write(creds_content.strip())
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(normalized)
+            if not normalized.endswith("\n"):
+                f.write("\n")
         creds_file = temp_creds_path
 
     try:
