@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     neon_auth_jwks_url: str = ""
     neon_oauth_client_id: str = "placeholder_client_id"
     neon_oauth_redirect_uri: str = "http://localhost:8080/oauth/callback"
+    # Public URL of this auth service (required on Render so OAuth callbacks are not localhost).
+    public_base_url: str = ""
     jwt_algorithm: str = "EdDSA"  # Neon Auth uses EdDSA with Ed25519 (OKP keys), verified via JWKS
     jwt_cache_ttl_seconds: int = 3600  # Cache JWKS keys for 1 hour
     jwt_token_leeway_seconds: int = 300  # Clock skew tolerance (iat, exp validation)
