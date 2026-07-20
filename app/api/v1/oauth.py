@@ -6,13 +6,12 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
 from app.auth.app_token_service import AppTokenError, rotate_extension_refresh_token, issue_extension_token_pair, revoke_extension_refresh_token
 from app.auth.core import verify_neon_auth_jwt, NeonAuthVerificationError
-from app.auth.roles import normalize_app_role
 from app.schemas.auth import AuthRefreshRequest, AuthRefreshResponse, AuthLogoutRequest
 from app.auth.oauth_code_service import (
     OAuthCodeError,
@@ -26,14 +25,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
-_OAUTH_TX_COOKIE = "vertex_oauth_tx"
 _NEON_AUTH_SDK = "https://esm.sh/@neondatabase/auth@0.4.2-beta?bundle"
 _NEON_AUTH_ADAPTERS = "https://esm.sh/@neondatabase/auth@0.4.2-beta/vanilla/adapters?bundle"
 
 _PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,512}$")
 _VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
-_TRANSACTION_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
 
 def _validate_loopback_redirect_uri(value: str) -> str:
@@ -79,36 +76,6 @@ def _oauth_callback_url(request: Request) -> str:
     return f"{str(request.base_url).rstrip('/')}/oauth/callback"
 
 
-def _oauth_cookie_secure(request: Request) -> bool:
-    configured = settings.public_base_url.strip().lower()
-    if configured:
-        return configured.startswith("https://")
-    return request.url.scheme == "https"
-
-
-def _set_oauth_transaction_cookie(response: HTMLResponse, request: Request, transaction_id: str) -> None:
-    response.set_cookie(
-        key=_OAUTH_TX_COOKIE,
-        value=transaction_id,
-        max_age=5 * 60,
-        httponly=True,
-        secure=_oauth_cookie_secure(request),
-        samesite="lax",
-        path="/oauth",
-    )
-
-
-def _clear_oauth_transaction_cookie(response: JSONResponse) -> None:
-    response.delete_cookie(_OAUTH_TX_COOKIE, path="/oauth")
-
-
-def _read_oauth_transaction(request: Request) -> str:
-    transaction_id = request.cookies.get(_OAUTH_TX_COOKIE, "")
-    if not _TRANSACTION_RE.fullmatch(transaction_id):
-        raise OAuthCodeError("Missing or invalid OAuth transaction cookie")
-    return transaction_id
-
-
 def _neon_auth_client_bootstrap(neon_auth_base_url: str) -> str:
     """Shared browser bootstrap for the Neon Auth SDK (handles session verifier on callback)."""
     return f"""
@@ -152,9 +119,11 @@ async def oauth_start(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Auth storage unavailable: {exc}",
         ) from exc
-
+    
+    # Dynamically determine the backend's callback URL based on where the app is deployed
     backend_callback_url = _oauth_callback_url(request)
-    bootstrap = _neon_auth_client_bootstrap(settings.neon_auth_base_url)
+    
+    neon_callback_url = _append_query(backend_callback_url, transaction=transaction_id)
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -167,46 +136,43 @@ async def oauth_start(
     <body>
         <h2>Redirecting to Secure Login...</h2>
         <script type="module">
-            {bootstrap}
+            {_neon_auth_client_bootstrap(settings.neon_auth_base_url)}
             authClient.signIn.social({{
                 provider: "google",
-                callbackURL: "{backend_callback_url}"
+                callbackURL: "{neon_callback_url}"
             }}).catch(err => {{
-                document.body.textContent = "Failed to start login: " + err.message;
+                document.body.innerHTML = "Failed to start login: " + err.message;
             }});
         </script>
     </body>
     </html>
     """
-
+    
     logger.info("Serving SDK-based OAuth start page")
-    response = HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
-    _set_oauth_transaction_cookie(response, request, transaction_id)
-    return response
-
-
+    return HTMLResponse(content=html)
 @router.get("/callback")
 async def oauth_callback(request: Request):
-    """Handles the redirect back from Neon."""
-    bootstrap = _neon_auth_client_bootstrap(settings.neon_auth_base_url)
+    """
+    Handles the redirect back from Neon.
+    """
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Authenticating...</title>
         <script type="module">
-            {bootstrap}
+            {_neon_auth_client_bootstrap(settings.neon_auth_base_url)}
 
             window.onload = async function() {{
                 const params = new URLSearchParams(window.location.search);
                 const error = params.get('error');
+                const transaction = params.get('transaction');
 
                 if (error) {{
                     const res = await fetch('/oauth/fail-login', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},
-                        credentials: 'include',
-                        body: JSON.stringify({{}})
+                        body: JSON.stringify({{ transaction }})
                     }});
                     const resData = await res.json();
                     if (resData.redirect_url) {{
@@ -217,11 +183,18 @@ async def oauth_callback(request: Request):
                     return;
                 }}
 
+                if (!transaction) {{
+                    document.body.textContent = "Authentication failed: missing login transaction.";
+                    return;
+                }}
+
                 try {{
+                    // Neon appends neon_auth_session_verifier to this URL; the SDK
+                    // forwards it on get-session to establish the cross-domain session.
                     const {{ data: sessionData, error: sessionError }} = await authClient.getSession();
 
                     if (sessionError || !sessionData?.session) {{
-                        document.body.textContent = "Authentication failed. Could not establish Neon session.";
+                        document.body.innerHTML = "Authentication failed. Could not establish Neon session.";
                         return;
                     }}
 
@@ -229,7 +202,7 @@ async def oauth_callback(request: Request):
                     if (!token) {{
                         const {{ data: tokenData, error: tokenError }} = await authClient.token();
                         if (tokenError || !tokenData?.token) {{
-                            document.body.textContent = "Authentication failed. Could not retrieve token from Neon.";
+                            document.body.innerHTML = "Authentication failed. Could not retrieve token from Neon.";
                             return;
                         }}
                         token = tokenData.token;
@@ -238,18 +211,17 @@ async def oauth_callback(request: Request):
                     const res = await fetch('/oauth/complete-login', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},
-                        credentials: 'include',
-                        body: JSON.stringify({{ token }})
+                        body: JSON.stringify({{ token, transaction }})
                     }});
                     const resData = await res.json();
 
                     if (resData.redirect_url) {{
                         window.location.href = resData.redirect_url;
                     }} else {{
-                        document.body.textContent = "Failed to exchange token: " + (resData.detail || "Unknown error");
+                        document.body.innerHTML = "Failed to exchange token: " + (resData.detail || "Unknown error");
                     }}
                 }} catch (err) {{
-                    document.body.textContent = "Failed to communicate with server: " + err;
+                    document.body.innerHTML = "Failed to communicate with server: " + err;
                 }}
             }}
         </script>
@@ -262,68 +234,56 @@ async def oauth_callback(request: Request):
     </body>
     </html>
     """
-    return HTMLResponse(content=html_content, headers={"Cache-Control": "no-store"})
+    return HTMLResponse(content=html_content)
 
 
 class CompleteLoginRequest(BaseModel):
     token: str
+    transaction: str
 
 
 class FailedLoginRequest(BaseModel):
-    pass
+    transaction: str | None = None
 
 
 @router.post("/fail-login")
-async def oauth_fail_login(request: Request, _req: FailedLoginRequest | None = None):
+async def oauth_fail_login(req: FailedLoginRequest):
     """End a failed browser login at the matching extension callback."""
     try:
-        transaction_id = _read_oauth_transaction(request)
-        transaction = await consume_login_transaction(transaction_id)
-        response = JSONResponse(
-            {"redirect_url": _append_query(
-                transaction["redirect_uri"],
-                error="Authentication failed in the browser.",
-                state=transaction["state"],
-            )},
-            headers={"Cache-Control": "no-store"},
-        )
-        _clear_oauth_transaction_cookie(response)
-        return response
+        transaction = await consume_login_transaction(req.transaction or "")
+        return {"redirect_url": _append_query(
+            transaction["redirect_uri"],
+            error="Authentication failed in the browser.",
+            state=transaction["state"],
+        )}
     except (OAuthCodeError, KeyError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-
 @router.post("/complete-login")
-async def oauth_complete_login(request: Request, req: CompleteLoginRequest):
+async def oauth_complete_login(req: CompleteLoginRequest):
     """Verify the Neon session and create a single-use PKCE-bound code."""
     try:
-        transaction_id = _read_oauth_transaction(request)
         neon_claims = await verify_neon_auth_jwt(req.token)
         user_id = neon_claims.get("sub")
         if not isinstance(user_id, str) or not user_id:
             raise NeonAuthVerificationError("Neon token missing user id")
         email = neon_claims.get("email", "")
-        role = normalize_app_role(neon_claims.get("role"))
+        role = neon_claims.get("role", "authenticated")
 
-        transaction = await consume_login_transaction(transaction_id)
+        transaction = await consume_login_transaction(req.transaction)
         authorization_code = await create_authorization_code(
             redirect_uri=transaction["redirect_uri"],
             code_challenge=transaction["code_challenge"],
             user_id=user_id,
             email=email if isinstance(email, str) else "",
-            role=role,
+            role=role if isinstance(role, str) and role else "authenticated"
         )
-        response = JSONResponse(
-            {"redirect_url": _append_query(
-                transaction["redirect_uri"], code=authorization_code, state=transaction["state"]
-            )},
-            headers={"Cache-Control": "no-store"},
-        )
-        _clear_oauth_transaction_cookie(response)
-        return response
+        return {"redirect_url": _append_query(
+            transaction["redirect_uri"], code=authorization_code, state=transaction["state"]
+        )}
     except (NeonAuthVerificationError, OAuthCodeError, KeyError, ValueError) as exc:
-        logger.error("Failed implicit exchange: %s", exc)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.error(f"Failed implicit exchange: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 class AuthorizationCodeTokenRequest(BaseModel):
@@ -347,7 +307,7 @@ async def oauth_token_exchange(req: AuthorizationCodeTokenRequest):
         token_pair = await issue_extension_token_pair(
             user_id=code_data["user_id"],
             email=code_data["email"],
-            role=normalize_app_role(code_data["role"]),
+            role=code_data["role"],
         )
     except (AppTokenError, OAuthCodeError, KeyError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -371,7 +331,7 @@ async def oauth_refresh(req: AuthRefreshRequest):
     try:
         token_pair = await rotate_extension_refresh_token(req.refresh_token)
         from datetime import datetime, timezone
-
+        
         def _seconds_until(expires_at: datetime) -> int:
             return max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds()))
 
@@ -396,6 +356,6 @@ async def oauth_logout(req: AuthLogoutRequest):
             await revoke_extension_refresh_token(req.refresh_token)
         except Exception as exc:
             logger.error(f"Error during token revocation: {exc}")
-
+    
     from app.schemas.auth import AuthLogoutResponse
     return AuthLogoutResponse()

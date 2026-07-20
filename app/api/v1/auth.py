@@ -11,7 +11,6 @@ from app.auth.app_token_service import (
     rotate_extension_refresh_token,
 )
 from app.auth.core import NeonAuthVerificationError, verify_neon_auth_jwt
-from app.auth.roles import normalize_app_role
 from app.auth.dependencies import AuthenticatedUser, get_current_user
 from app.auth.middleware import extract_bearer_token
 from app.schemas.auth import (
@@ -63,13 +62,13 @@ async def exchange_neon_token(request: Request):
         )
 
     email = neon_claims.get("email")
-    role = normalize_app_role(neon_claims.get("role"))
+    role = neon_claims.get("role", "authenticated")
 
     try:
         token_pair = await issue_extension_token_pair(
             user_id=user_id,
             email=email if isinstance(email, str) else "",
-            role=role,
+            role=role if isinstance(role, str) and role else "authenticated",
         )
     except AppTokenError as exc:
         logger.error("Failed to issue extension token pair for user_id=%s: %s", user_id, str(exc))
@@ -89,7 +88,7 @@ async def exchange_neon_token(request: Request):
         user=AuthUserSchema(
             id=user_id,
             email=email if isinstance(email, str) else "",
-            role=role,
+            role=role if isinstance(role, str) and role else "authenticated",
         ),
     )
 
