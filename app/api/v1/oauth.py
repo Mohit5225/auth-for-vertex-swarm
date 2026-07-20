@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
+_NEON_AUTH_SDK = "https://esm.sh/@neondatabase/auth@0.4.2-beta?bundle"
+_NEON_AUTH_ADAPTERS = "https://esm.sh/@neondatabase/auth@0.4.2-beta/vanilla/adapters?bundle"
+
 _PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,512}$")
 _VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
@@ -73,6 +76,20 @@ def _oauth_callback_url(request: Request) -> str:
     return f"{str(request.base_url).rstrip('/')}/oauth/callback"
 
 
+def _neon_auth_client_bootstrap(neon_auth_base_url: str) -> str:
+    """Shared browser bootstrap for the Neon Auth SDK (handles session verifier on callback)."""
+    return f"""
+            import {{ createAuthClient }} from "{_NEON_AUTH_SDK}";
+            import {{ BetterAuthVanillaAdapter }} from "{_NEON_AUTH_ADAPTERS}";
+
+            const authClient = createAuthClient("{neon_auth_base_url}", {{
+                adapter: BetterAuthVanillaAdapter({{
+                    fetchOptions: {{ credentials: "include" }},
+                }}),
+            }});
+"""
+
+
 @router.get("/start")
 async def oauth_start(
     request: Request,
@@ -119,13 +136,7 @@ async def oauth_start(
     <body>
         <h2>Redirecting to Secure Login...</h2>
         <script type="module">
-            import {{ createAuthClient }} from "https://esm.sh/better-auth/client?bundle";
-            
-            const authClient = createAuthClient({{
-                baseURL: "{settings.neon_auth_base_url}",
-                fetchOptions: {{ credentials: "include" }},
-            }});
-            
+            {_neon_auth_client_bootstrap(settings.neon_auth_base_url)}
             authClient.signIn.social({{
                 provider: "google",
                 callbackURL: "{neon_callback_url}"
@@ -150,12 +161,7 @@ async def oauth_callback(request: Request):
     <head>
         <title>Authenticating...</title>
         <script type="module">
-            import {{ createAuthClient }} from "https://esm.sh/better-auth/client?bundle";
-            
-            const authClient = createAuthClient({{
-                baseURL: "{settings.neon_auth_base_url}",
-                fetchOptions: {{ credentials: "include" }},
-            }});
+            {_neon_auth_client_bootstrap(settings.neon_auth_base_url)}
 
             window.onload = async function() {{
                 const params = new URLSearchParams(window.location.search);
@@ -183,24 +189,32 @@ async def oauth_callback(request: Request):
                 }}
 
                 try {{
-                    // Ask Neon Auth for the JWT string
-                    const {{ data, error: tokenError }} = await authClient.token();
-                    
-                    if (tokenError || !data?.token) {{
-                        document.body.innerHTML = "Authentication failed. Could not retrieve token from Neon.";
+                    // Neon appends neon_auth_session_verifier to this URL; the SDK
+                    // forwards it on get-session to establish the cross-domain session.
+                    const {{ data: sessionData, error: sessionError }} = await authClient.getSession();
+
+                    if (sessionError || !sessionData?.session) {{
+                        document.body.innerHTML = "Authentication failed. Could not establish Neon session.";
                         return;
                     }}
 
-                    // The browser supplies the Neon session to the hosted service.
-                    // The service returns only a short-lived authorization code URL;
-                    // extension access and refresh tokens never enter this redirect.
+                    let token = sessionData.session.token;
+                    if (!token) {{
+                        const {{ data: tokenData, error: tokenError }} = await authClient.token();
+                        if (tokenError || !tokenData?.token) {{
+                            document.body.innerHTML = "Authentication failed. Could not retrieve token from Neon.";
+                            return;
+                        }}
+                        token = tokenData.token;
+                    }}
+
                     const res = await fetch('/oauth/complete-login', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ token: data.token, transaction }})
+                        body: JSON.stringify({{ token, transaction }})
                     }});
                     const resData = await res.json();
-                    
+
                     if (resData.redirect_url) {{
                         window.location.href = resData.redirect_url;
                     }} else {{
