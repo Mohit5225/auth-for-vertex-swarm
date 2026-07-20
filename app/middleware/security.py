@@ -37,9 +37,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "Content-Security-Policy",
                 (
                     "default-src 'none'; "
-                    "script-src 'self'; "
+                    "script-src 'self' 'unsafe-inline' https://esm.sh; "
                     "style-src 'unsafe-inline'; "
-                    f"connect-src 'self' {settings.neon_auth_base_url.rstrip('/')}; "
+                    f"connect-src 'self' {settings.neon_auth_base_url.rstrip('/')} https://esm.sh; "
                     "img-src 'none'; "
                     "frame-ancestors 'none'; "
                     "base-uri 'none';"

@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
 _OAUTH_TX_COOKIE = "vertex_oauth_tx"
-_NEON_AUTH_SDK_FILE = "neon-auth-bundle.mjs"
-_NEON_AUTH_ADAPTERS_FILE = "neon-auth-adapters.mjs"
+_NEON_AUTH_SDK = "https://esm.sh/@neondatabase/auth@0.4.2-beta?bundle"
+_NEON_AUTH_ADAPTERS = "https://esm.sh/@neondatabase/auth@0.4.2-beta/vanilla/adapters?bundle"
 
 _PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,512}$")
@@ -79,10 +79,6 @@ def _oauth_callback_url(request: Request) -> str:
     return f"{str(request.base_url).rstrip('/')}/oauth/callback"
 
 
-def _static_oauth_asset_url(request: Request, filename: str) -> str:
-    return f"{str(request.base_url).rstrip('/')}/static/oauth/{filename}"
-
-
 def _oauth_cookie_secure(request: Request) -> bool:
     configured = settings.public_base_url.strip().lower()
     if configured:
@@ -113,13 +109,11 @@ def _read_oauth_transaction(request: Request) -> str:
     return transaction_id
 
 
-def _neon_auth_client_bootstrap(request: Request, neon_auth_base_url: str) -> str:
-    """Shared browser bootstrap for the self-hosted Neon Auth SDK."""
-    sdk_url = _static_oauth_asset_url(request, _NEON_AUTH_SDK_FILE)
-    adapters_url = _static_oauth_asset_url(request, _NEON_AUTH_ADAPTERS_FILE)
+def _neon_auth_client_bootstrap(neon_auth_base_url: str) -> str:
+    """Shared browser bootstrap for the Neon Auth SDK (handles session verifier on callback)."""
     return f"""
-            import {{ createAuthClient }} from "{sdk_url}";
-            import {{ BetterAuthVanillaAdapter }} from "{adapters_url}";
+            import {{ createAuthClient }} from "{_NEON_AUTH_SDK}";
+            import {{ BetterAuthVanillaAdapter }} from "{_NEON_AUTH_ADAPTERS}";
 
             const authClient = createAuthClient("{neon_auth_base_url}", {{
                 adapter: BetterAuthVanillaAdapter({{
@@ -160,7 +154,7 @@ async def oauth_start(
         ) from exc
 
     backend_callback_url = _oauth_callback_url(request)
-    bootstrap = _neon_auth_client_bootstrap(request, settings.neon_auth_base_url)
+    bootstrap = _neon_auth_client_bootstrap(settings.neon_auth_base_url)
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -185,7 +179,7 @@ async def oauth_start(
     </html>
     """
 
-    logger.info("Serving self-hosted SDK OAuth start page")
+    logger.info("Serving SDK-based OAuth start page")
     response = HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
     _set_oauth_transaction_cookie(response, request, transaction_id)
     return response
@@ -194,7 +188,7 @@ async def oauth_start(
 @router.get("/callback")
 async def oauth_callback(request: Request):
     """Handles the redirect back from Neon."""
-    bootstrap = _neon_auth_client_bootstrap(request, settings.neon_auth_base_url)
+    bootstrap = _neon_auth_client_bootstrap(settings.neon_auth_base_url)
     html_content = f"""
     <!DOCTYPE html>
     <html>
