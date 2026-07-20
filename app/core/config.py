@@ -94,6 +94,28 @@ class Settings(BaseSettings):
     app_auth_refresh_token_ttl_seconds: int = 0
 
     # ========================================
+    # Auth endpoint rate limiting
+    # ========================================
+    rate_limit_enabled: bool = True
+    rate_limit_window_seconds: int = 60
+    rate_limit_start_per_minute: int = 20
+    rate_limit_token_per_minute: int = 30
+    rate_limit_refresh_per_minute: int = 60
+
+    @field_validator("rate_limit_enabled", mode="before")
+    @classmethod
+    def _parse_rate_limit_enabled(cls, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return value
+
+    # ========================================
     # OpenAI-compatible LLM provider
     # OpenRouter is the active path; Modal is retained for rollback.
     # ========================================

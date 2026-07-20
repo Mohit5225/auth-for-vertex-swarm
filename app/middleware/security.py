@@ -11,18 +11,10 @@ from starlette.responses import JSONResponse, Response
 
 from app.core.config import settings
 
-_AUTH_RATE_LIMIT_PATHS = (
-    "/oauth/start",
-    "/oauth/token",
-    "/oauth/refresh",
-    "/oauth/complete-login",
-    "/oauth/fail-login",
-    "/api/v1/auth/refresh",
-    "/api/v1/auth/exchange",
-)
-
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Not wired by default — enable separately after OAuth login is verified."""
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -48,41 +40,59 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+def rate_limit_for_path(path: str) -> int | None:
+    """Return per-minute request cap for a path, or None if unlimited."""
+    if path == "/oauth/start":
+        return settings.rate_limit_start_per_minute
+    if path == "/oauth/token":
+        return settings.rate_limit_token_per_minute
+    if path in {"/oauth/refresh", "/api/v1/auth/refresh"}:
+        return settings.rate_limit_refresh_per_minute
+    if path in {"/oauth/complete-login", "/oauth/fail-login"}:
+        return settings.rate_limit_start_per_minute
+    if path == "/api/v1/auth/exchange":
+        return settings.rate_limit_token_per_minute
+    return None
+
+
 class AuthRateLimitMiddleware(BaseHTTPMiddleware):
-  """Simple in-memory per-IP rate limiter for auth endpoints."""
+    """In-memory per-IP sliding window for auth endpoints only."""
 
-  def __init__(self, app, *, max_requests: int, window_seconds: int) -> None:
-      super().__init__(app)
-      self.max_requests = max_requests
-      self.window_seconds = window_seconds
-      self._hits: dict[str, deque[float]] = defaultdict(deque)
+    def __init__(self, app) -> None:
+        super().__init__(app)
+        self._hits: dict[str, deque[float]] = defaultdict(deque)
 
-  def _client_ip(self, request: Request) -> str:
-      forwarded = request.headers.get("X-Forwarded-For", "")
-      if forwarded:
-          return forwarded.split(",")[0].strip()
-      if request.client and request.client.host:
-          return request.client.host
-      return "unknown"
+    @staticmethod
+    def _client_ip(request: Request) -> str:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        if request.client and request.client.host:
+            return request.client.host
+        return "unknown"
 
-  def _should_limit(self, path: str) -> bool:
-      return any(path == prefix or path.startswith(f"{prefix}/") for prefix in _AUTH_RATE_LIMIT_PATHS)
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if not settings.rate_limit_enabled:
+            return await call_next(request)
 
-  async def dispatch(self, request: Request, call_next: Callable) -> Response:
-      if not self._should_limit(request.url.path):
-          return await call_next(request)
+        max_requests = rate_limit_for_path(request.url.path)
+        if max_requests is None:
+            return await call_next(request)
 
-      now = time.monotonic()
-      key = f"{self._client_ip(request)}:{request.url.path}"
-      bucket = self._hits[key]
-      while bucket and now - bucket[0] > self.window_seconds:
-          bucket.popleft()
+        window_seconds = max(1, settings.rate_limit_window_seconds)
+        now = time.monotonic()
+        key = f"{self._client_ip(request)}:{request.url.path}"
+        bucket = self._hits[key]
+        while bucket and now - bucket[0] > window_seconds:
+            bucket.popleft()
 
-      if len(bucket) >= self.max_requests:
-          return JSONResponse(
-              status_code=429,
-              content={"detail": "Too many requests. Please try again shortly."},
-          )
+        if len(bucket) >= max_requests:
+            retry_after = max(1, int(window_seconds - (now - bucket[0])) if bucket else window_seconds)
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests"},
+                headers={"Retry-After": str(retry_after)},
+            )
 
-      bucket.append(now)
-      return await call_next(request)
+        bucket.append(now)
+        return await call_next(request)

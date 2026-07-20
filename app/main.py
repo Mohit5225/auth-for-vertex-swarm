@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from app.core.config import settings
+from app.middleware.security import AuthRateLimitMiddleware
 # from app.db.redis_db import init_redis, close_redis
 # from app.db.redis_db.agent_infra.heartbeat import init_vitality_tracker, close_vitality_tracker
 
@@ -181,6 +182,9 @@ app.add_middleware(
     allow_methods=settings.cors_allow_methods,
     allow_headers=settings.cors_allow_headers,
 )
+
+# Auth rate limiting — no-op until RATE_LIMIT_ENABLED=true on the server.
+app.add_middleware(AuthRateLimitMiddleware)
 
 
 @app.get("/health")
