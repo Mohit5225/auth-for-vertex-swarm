@@ -88,10 +88,14 @@ class Settings(BaseSettings):
     app_auth_audience: str = "vertex-swarm-extension"
 
     # Legacy env compatibility: APP_AUTH_TOKEN_TTL_SECONDS
-    app_auth_token_ttl_seconds: int = 604800
+    app_auth_token_ttl_seconds: int = 259200  # 3 days
     # Preferred explicit TTL settings (set to 0 to fall back)
     app_auth_access_token_ttl_seconds: int = 900
-    app_auth_refresh_token_ttl_seconds: int = 0
+    app_auth_refresh_token_ttl_seconds: int = 259200  # 3 days
+
+    # Auth endpoint rate limiting (per IP, in-memory — fine for single Render instance)
+    auth_rate_limit_max_requests: int = 30
+    auth_rate_limit_window_seconds: int = 60
 
     # ========================================
     # OpenAI-compatible LLM provider

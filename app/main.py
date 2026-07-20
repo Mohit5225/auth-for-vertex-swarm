@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from app.core.config import settings
 # from app.db.redis_db import init_redis, close_redis
@@ -14,6 +15,7 @@ from app.core.config import settings
 # from app.db.redis_db.agent_infra.jobs import init_archival_job, close_archival_job
 from app.db.nats_db import setup_nats, close_nats
 from app.db.postgres.connection import async_engine, Base
+from app.middleware.security import AuthRateLimitMiddleware, SecurityHeadersMiddleware
 import app.db.postgres.models  # noqa: F401 — registers ORM metadata before create_all
 
 logging.basicConfig(
@@ -181,6 +183,16 @@ app.add_middleware(
     allow_methods=settings.cors_allow_methods,
     allow_headers=settings.cors_allow_headers,
 )
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(
+    AuthRateLimitMiddleware,
+    max_requests=settings.auth_rate_limit_max_requests,
+    window_seconds=settings.auth_rate_limit_window_seconds,
+)
+
+static_dir = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
 @app.get("/health")
